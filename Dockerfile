@@ -8,43 +8,21 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone and checkout a working commit (before rmcp dependency issue)
+# Clone and go back much further
 RUN git clone https://github.com/smallcloudai/refact.git /src
 WORKDIR /src
 
-# Go back to a commit from a few weeks ago (before dependency issues)
-RUN git checkout HEAD~20
+# Go back 100 commits to find a stable version
+RUN git checkout HEAD~100
 
 # Build the engine
 WORKDIR /src/refact-agent/engine
 RUN cargo build --release
 
-# Runtime stage - smaller final image
+# Runtime stage
 FROM debian:bookworm-slim
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy only the built binary
+RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/refact-agent/engine/target/release/refact-lsp /usr/local/bin/
-
-# Expose port
 EXPOSE $PORT
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:$PORT/v1/caps || exit 1
-
-# Run the binary
-CMD refact-lsp \
-    --address-url ${AI_PROVIDER:-Anthropic} \
-    --api-key $ANTHROPIC_API_KEY \
-    --http-port $PORT \
-    --host 0.0.0.0 \
-    --logs-stderr \
-    --vecdb \
-    --ast \
-    --workspace-folder /tmp
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 CMD curl -f http://localhost:$PORT/v1/caps || exit 1
+CMD refact-lsp --address-url ${AI_PROVIDER:-Anthropic} --api-key $ANTHROPIC_API_KEY --http-port $PORT --host 0.0.0.0 --logs-stderr --vecdb --ast --workspace-folder /tmp
