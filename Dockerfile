@@ -2,10 +2,8 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Create package.json
-RUN echo '{"name":"refact-proxy","version":"1.0.0","dependencies":{"express":"^4.18.0","axios":"^1.6.0","cors":"^2.8.5"}}' > package.json
-
-# Install dependencies
+# Copy package.json and install dependencies
+COPY package.json .
 RUN npm install
 
 # Copy server file
