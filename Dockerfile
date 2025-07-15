@@ -1,28 +1,20 @@
-FROM rust:1.75-slim as builder
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Create package.json
+RUN echo '{"name":"refact-proxy","version":"1.0.0","dependencies":{"express":"^4.18.0","axios":"^1.6.0","cors":"^2.8.5"}}' > package.json
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    pkg-config \
-    libssl-dev \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+RUN npm install
 
-# Clone and go back much further
-RUN git clone https://github.com/smallcloudai/refact.git /src
-WORKDIR /src
+# Copy server file
+COPY server.js .
 
-# Go back 100 commits to find a stable version
-RUN git checkout HEAD~100
-
-# Build the engine
-WORKDIR /src/refact-agent/engine
-RUN cargo build --release
-
-# Runtime stage
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /src/refact-agent/engine/target/release/refact-lsp /usr/local/bin/
 EXPOSE $PORT
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 CMD curl -f http://localhost:$PORT/v1/caps || exit 1
-CMD refact-lsp --address-url ${AI_PROVIDER:-Anthropic} --api-key $ANTHROPIC_API_KEY --http-port $PORT --host 0.0.0.0 --logs-stderr --vecdb --ast --workspace-folder /tmp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:$PORT/health || exit 1
+
+CMD ["node", "server.js"]
