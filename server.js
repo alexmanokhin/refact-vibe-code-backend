@@ -547,3 +547,213 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🛠️ Agent Tools: ${Object.keys(agent.tools).join(', ')}`);
   console.log(`🔧 Autonomous patching enabled`);
 });
+
+// CHAT INTERFACE WITH SUPABASE PERSISTENCE (Missing endpoint)
+
+// Chat with project (approve, modify, ask questions)
+app.post('/v1/projects/:projectId/chat', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { message, github_token, session_id } = req.body;
+    
+    // Get project
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('*')
+      .or(`id.eq.${projectId},slug.eq.${projectId}`)
+      .single();
+      
+    if (projectError || !project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Get or create chat session
+    let chatSession;
+    if (session_id) {
+      const { data } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('id', session_id)
+        .single();
+      chatSession = data;
+    } else {
+      // Get the main session or create one
+      const { data: sessions } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('project_id', project.id)
+        .limit(1);
+        
+      if (sessions && sessions.length > 0) {
+        chatSession = sessions[0];
+      } else {
+        const { data: newSession } = await supabase
+          .from('chat_sessions')
+          .insert({
+            project_id: project.id,
+            session_name: 'Main Chat'
+          })
+          .select()
+          .single();
+        chatSession = newSession;
+      }
+    }
+
+    // Get chat history
+    const { data: chatHistory } = await supabase
+      .from('chat_messages')
+      .select('*')
+      .eq('session_id', chatSession.id)
+      .order('timestamp', { ascending: true });
+
+    // Add user message to history
+    await supabase
+      .from('chat_messages')
+      .insert({
+        session_id: chatSession.id,
+        role: 'user',
+        content: message
+      });
+
+    // Analyze user intent
+    const intent = analyzeUserIntent(message);
+    let response = '';
+    let action_taken = null;
+
+    if (intent.type === 'approve') {
+      // User wants to approve and commit using agent
+      if (!agent.workspaces.has(project.id)) {
+        const octokit = new Octokit({ auth: github_token });
+        const workspace = await loadWorkspaceFromGitHub(octokit, project);
+        agent.workspaces.set(project.id, workspace);
+      }
+
+      // Use agent to commit the current state
+      const result = await agent.executeAgentWorkflow(
+        "Commit all current changes to GitHub", 
+        project.id, 
+        github_token
+      );
+      
+      if (result.success) {
+        response = "✅ Perfect! I've committed your code to GitHub using the autonomous agent! 🚀\n\nYour website is now live at: " + project.github_repo;
+        action_taken = 'committed_to_github';
+      } else {
+        response = "❌ I had trouble committing to GitHub: " + (result.error || 'Unknown error');
+        action_taken = 'commit_failed';
+      }
+
+    } else if (intent.type === 'deploy' || message.toLowerCase().includes('see the website') || message.toLowerCase().includes('final html')) {
+      // User wants to see the deployed website
+      response = `🌐 To see your completed website, you have a few options:
+
+**Option 1: Deploy to Vercel (Easiest)**
+1. Go to [vercel.com](https://vercel.com)
+2. Connect your GitHub account
+3. Import your repository: ${project.github_repo}
+4. Click "Deploy" - it will be live in 2 minutes!
+
+**Option 2: Deploy to Netlify**
+1. Go to [netlify.com](https://netlify.com)
+2. Drag and drop your project files
+3. Get instant live URL
+
+**Option 3: GitHub Pages**
+1. Go to your repo: ${project.github_repo}
+2. Settings → Pages → Deploy from main branch
+
+**Your repo has all the code ready to deploy!** 🚀
+
+Would you like me to help you set up automatic deployment?`;
+      action_taken = 'deployment_help';
+
+    } else if (intent.type === 'modify') {
+      // User wants to modify the code using agent
+      const result = await agent.executeAgentWorkflow(message, project.id, github_token);
+      
+      if (result.success) {
+        response = "✨ Great! I've updated your code using the autonomous agent:\n\n" + 
+                  `**Changes made:**\n${result.changes.map(c => `- ${c.type}: ${c.file}`).join('\n')}\n\n` +
+                  `**Reasoning:** ${result.reasoning}\n\n` +
+                  "💬 The changes have been committed to GitHub! Check your repository or deploy to see the updates.";
+        action_taken = 'code_modified_by_agent';
+      } else {
+        response = "🤔 I had trouble making those changes: " + (result.error || 'Unknown error');
+        action_taken = 'modification_failed';
+      }
+
+    } else {
+      // General conversation
+      const conversationPrompt = buildConversationPrompt(message, chatHistory, project);
+      const aiResponse = await agent.callClaudeAPI(conversationPrompt);
+      
+      response = aiResponse.choices[0].message.content;
+      action_taken = 'general_chat';
+    }
+
+    // Add AI response to history
+    await supabase
+      .from('chat_messages')
+      .insert({
+        session_id: chatSession.id,
+        role: 'assistant',
+        content: response,
+        action_taken
+      });
+
+    res.json({
+      message: response,
+      action_taken,
+      session_id: chatSession.id,
+      project_info: {
+        id: project.id,
+        slug: project.slug,
+        name: project.name,
+        github_repo: project.github_repo
+      }
+    });
+
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper functions for chat
+const analyzeUserIntent = (message) => {
+  const msg = message.toLowerCase();
+  
+  if (msg.includes('commit') || msg.includes('approve') || msg.includes('looks good') || 
+      msg.includes('perfect') || msg.includes('push')) {
+    return { type: 'approve' };
+  }
+  
+  if (msg.includes('deploy') || msg.includes('see the website') || msg.includes('final html') ||
+      msg.includes('live version') || msg.includes('view the site')) {
+    return { type: 'deploy' };
+  }
+  
+  if (msg.includes('change') || msg.includes('modify') || msg.includes('update') ||
+      msg.includes('make it') || msg.includes('add') || msg.includes('remove')) {
+    return { type: 'modify' };
+  }
+  
+  return { type: 'general' };
+};
+
+const buildConversationPrompt = (userMessage, chatHistory, project) => {
+  let prompt = `You are an AI assistant helping with the ${project.name} project. `;
+  
+  if (chatHistory && chatHistory.length > 0) {
+    prompt += `Previous conversation:\n`;
+    chatHistory.slice(-4).forEach(msg => {
+      prompt += `${msg.role}: ${msg.content}\n`;
+    });
+    prompt += `\n`;
+  }
+  
+  prompt += `User: ${userMessage}\n\nRespond helpfully and conversationally. If they want to see their website, suggest deployment options.`;
+  
+  return prompt;
+};
+
