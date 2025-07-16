@@ -4,9 +4,7 @@ const cors = require('cors');
 const { Octokit } = require('@octokit/rest');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
-const simpleGit = require('simple-git');
 const fs = require('fs-extra');
-const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 8001;
@@ -20,7 +18,7 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// AGENT TOOLS IMPLEMENTATION
+// SIMPLIFIED AGENT TOOLS IMPLEMENTATION
 
 class RefactAgent {
   constructor() {
@@ -31,19 +29,16 @@ class RefactAgent {
       locate: this.locateFiles.bind(this),
       patch: this.applyPatch.bind(this),
       think: this.planTask.bind(this),
-      web: this.fetchWebContent.bind(this),
-      definition: this.getDefinitions.bind(this),
-      references: this.findReferences.bind(this)
+      web: this.fetchWebContent.bind(this)
     };
     this.workspaces = new Map(); // Store project workspaces
   }
 
   async searchCodebase(query, projectId) {
-    // Vector search implementation
     const workspace = this.workspaces.get(projectId);
     if (!workspace) return [];
     
-    // Simple text search for now (can upgrade to vector DB later)
+    // Simple text search
     const results = [];
     for (const [filePath, content] of Object.entries(workspace.files)) {
       if (content.toLowerCase().includes(query.toLowerCase())) {
@@ -93,7 +88,6 @@ class RefactAgent {
     const workspace = this.workspaces.get(projectId);
     if (!workspace) return [];
     
-    // Smart file location based on task
     const relevantFiles = [];
     const files = Object.keys(workspace.files);
     
@@ -147,14 +141,13 @@ class RefactAgent {
   }
 
   async planTask(taskDescription) {
-    // Use Claude for planning with o3-mini-like reasoning
     const planningPrompt = `You are an expert software architect. Break down this task into a detailed execution plan:
 
 Task: ${taskDescription}
 
 Create a step-by-step plan that includes:
 1. Understanding phase (what files to examine, what context to gather)
-2. Planning phase (what changes are needed, dependencies, potential issues)
+2. Planning phase (what changes are needed, dependencies, potential issues)  
 3. Execution phase (specific code changes, file operations, testing)
 
 Respond with a structured plan in JSON format:
@@ -174,10 +167,11 @@ Respond with a structured plan in JSON format:
 
   async fetchWebContent(url) {
     try {
+      const fetch = (await import('node-fetch')).default;
       const response = await fetch(url);
       const html = await response.text();
       
-      // Simple text extraction (can upgrade with cheerio for better parsing)
+      // Simple text extraction
       const textContent = html
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
@@ -185,54 +179,10 @@ Respond with a structured plan in JSON format:
         .replace(/\s+/g, ' ')
         .trim();
         
-      return textContent.substring(0, 5000); // Limit size
+      return textContent.substring(0, 5000);
     } catch (error) {
       return `Error fetching ${url}: ${error.message}`;
     }
-  }
-
-  async getDefinitions(symbol, projectId) {
-    // AST-based definition finding (simplified)
-    const workspace = this.workspaces.get(projectId);
-    if (!workspace) return [];
-    
-    const definitions = [];
-    for (const [file, content] of Object.entries(workspace.files)) {
-      const lines = content.split('\n');
-      lines.forEach((line, index) => {
-        if (line.includes(`function ${symbol}`) || 
-            line.includes(`const ${symbol}`) ||
-            line.includes(`class ${symbol}`)) {
-          definitions.push({
-            file,
-            line: index + 1,
-            definition: line.trim()
-          });
-        }
-      });
-    }
-    return definitions;
-  }
-
-  async findReferences(symbol, projectId) {
-    // Find all usages of a symbol
-    const workspace = this.workspaces.get(projectId);
-    if (!workspace) return [];
-    
-    const references = [];
-    for (const [file, content] of Object.entries(workspace.files)) {
-      const lines = content.split('\n');
-      lines.forEach((line, index) => {
-        if (line.includes(symbol) && !line.includes(`${symbol}:`)) {
-          references.push({
-            file,
-            line: index + 1,
-            context: line.trim()
-          });
-        }
-      });
-    }
-    return references;
   }
 
   async callClaudeAPI(prompt) {
@@ -273,20 +223,20 @@ Respond with a structured plan in JSON format:
             context.fileTree = await this.getFileTree(projectId);
             break;
           case 'cat':
-            context.files = await this.readFiles(step.target.split(','), projectId);
+            context.files = await this.readFiles(step.target ? step.target.split(',') : [], projectId);
             break;
           case 'search':
-            context.searchResults = await this.searchCodebase(step.target, projectId);
+            context.searchResults = await this.searchCodebase(step.target || '', projectId);
             break;
           case 'locate':
-            context.relevantFiles = await this.locateFiles(step.target, projectId);
+            context.relevantFiles = await this.locateFiles(step.target || taskDescription, projectId);
             break;
         }
       }
     }
     
     // 3. Execution phase with context
-    const executionPrompt = `You are an autonomous coding agent. Execute this task with full context:
+    const executionPrompt = `You are an autonomous coding agent with GitHub commit capabilities. Execute this task:
 
 Task: ${taskDescription}
 
@@ -294,17 +244,17 @@ Plan: ${JSON.stringify(plan, null, 2)}
 
 Context: ${JSON.stringify(context, null, 2)}
 
-Based on the plan and context, provide the exact code changes needed. Format your response as:
+Based on the plan and context, provide the exact code changes needed. You MUST format your response as valid JSON:
 
 {
   "changes": [
-    {"type": "create|update|delete", "file": "path/to/file", "content": "..."},
-    ...
+    {"type": "create", "file": "src/components/Hero.jsx", "content": "import React from 'react';\\n\\nconst Hero = () => {\\n  return (\\n    <div>Hero Component</div>\\n  );\\n};\\n\\nexport default Hero;"},
+    {"type": "update", "file": "src/App.jsx", "content": "updated file content here"}
   ],
-  "reasoning": "Why these changes accomplish the task"
+  "reasoning": "Created Hero component and updated App.jsx to use it"
 }
 
-Make actual working code changes that can be directly applied to the project.`;
+Make actual working React components with Tailwind CSS that can be directly applied to GitHub.`;
 
     const response = await this.callClaudeAPI(executionPrompt);
     
@@ -364,15 +314,13 @@ app.get('/v1/caps', (req, res) => {
       }
     },
     "agent_tools": {
-      "search": "Find similar code using vector database",
+      "search": "Find similar code using text search",
       "tree": "Get file tree with symbols",
       "cat": "Read multiple files", 
       "locate": "Find relevant files for tasks",
-      "patch": "Apply changes to files",
-      "think": "Analyze complex problems",
-      "web": "Fetch web pages",
-      "definition": "Read symbol definitions",
-      "references": "Find symbol usages"
+      "patch": "Apply changes to files and commit to GitHub",
+      "think": "Analyze complex problems and create execution plans",
+      "web": "Fetch web pages for documentation"
     },
     "version": "3.0.0"
   });
@@ -473,27 +421,6 @@ app.post('/v1/projects/:projectId/agent', async (req, res) => {
     // Execute autonomous agent workflow
     const result = await agent.executeAgentWorkflow(task, project.id, github_token);
     
-    if (result.success) {
-      // Store the interaction
-      await supabase
-        .from('chat_messages')
-        .insert({
-          session_id: uuidv4(), // Create session if needed
-          role: 'user',
-          content: `Agent Task: ${task}`,
-          action_taken: 'autonomous_execution'
-        });
-
-      await supabase
-        .from('chat_messages')
-        .insert({
-          session_id: uuidv4(),
-          role: 'assistant', 
-          content: `✅ Task completed autonomously!\n\n**Changes made:**\n${result.changes.map(c => `- ${c.type}: ${c.file}`).join('\n')}\n\n**Reasoning:** ${result.reasoning}`,
-          action_taken: 'autonomous_patch_applied'
-        });
-    }
-
     res.json({
       success: result.success,
       task: task,
@@ -514,7 +441,6 @@ app.post('/v1/projects/:projectId/agent', async (req, res) => {
 
 // Helper functions
 const loadWorkspaceFromGitHub = async (octokit, project) => {
-  // Load existing files from GitHub repo
   const workspace = {
     id: project.id,
     owner: project.owner,
@@ -578,6 +504,9 @@ function App() {
       <h1 className="text-4xl font-bold text-center py-20">
         Welcome to your Refact Agent project!
       </h1>
+      <p className="text-center text-gray-600">
+        This project has autonomous agent capabilities
+      </p>
     </div>
   );
 }
@@ -588,9 +517,26 @@ export default App;`,
       version: "1.0.0",
       dependencies: {
         react: "^18.0.0",
-        "react-dom": "^18.0.0"
+        "react-dom": "^18.0.0",
+        "@tailwindcss/forms": "^0.5.0"
       }
-    }, null, 2)
+    }, null, 2),
+    'README.md': `# Refact Agent Project
+
+This project was created with autonomous agent capabilities.
+
+## Features
+- Autonomous code generation
+- GitHub integration
+- Real-time file patching
+- Agent tool support
+
+## Getting Started
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+`
   };
 };
 
