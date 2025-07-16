@@ -310,3 +310,535 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Projects API: http://localhost:${PORT}/v1/projects`);
   console.log(`🔧 Features: GitHub integration, Complex apps, Database generation`);
 });
+
+// MISSING GENERATOR FUNCTIONS - Add these to the end of server.js
+
+const generateReadme = (complexity) => {
+  return `# VibeCode Generated Project
+
+This project was generated using VibeCode AI.
+
+## Complexity: ${complexity}
+
+## Quick Start
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+## Deploy
+
+### Vercel
+\`\`\`bash
+npm run build
+# Upload to Vercel
+\`\`\`
+
+### Netlify
+\`\`\`bash
+npm run build
+# Upload build folder to Netlify
+\`\`\`
+
+## Generated with ❤️ by VibeCode
+`;
+};
+
+const generateGitignore = () => {
+  return `# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+build/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+`;
+};
+
+const generateMainApp = (complexity) => {
+  if (complexity === 'complex') {
+    return `import React from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { AuthProvider } from './contexts/AuthContext';
+import Dashboard from './components/Dashboard';
+import Login from './components/Login';
+import Hero from './components/Hero';
+import './index.css';
+
+function App() {
+  return (
+    <AuthProvider>
+      <Router>
+        <div className="App">
+          <Routes>
+            <Route path="/" element={<Hero />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+          </Routes>
+        </div>
+      </Router>
+    </AuthProvider>
+  );
+}
+
+export default App;`;
+  } else {
+    return `import React from 'react';
+import Hero from './components/Hero';
+import './index.css';
+
+function App() {
+  return (
+    <div className="App">
+      <Hero />
+    </div>
+  );
+}
+
+export default App;`;
+  }
+};
+
+const generateIndex = () => {
+  return `import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);`;
+};
+
+const generateStyles = () => {
+  return `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}`;
+};
+
+const generateHTML = () => {
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Generated with VibeCode AI" />
+    <title>VibeCode Generated App</title>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>`;
+};
+
+// Complex app generators (for full-stack)
+const generateBackendPackageJson = () => {
+  return JSON.stringify({
+    name: "backend",
+    version: "1.0.0",
+    scripts: {
+      start: "node server.js",
+      dev: "nodemon server.js"
+    },
+    dependencies: {
+      express: "^4.18.0",
+      cors: "^2.8.5",
+      jsonwebtoken: "^9.0.0",
+      bcryptjs: "^2.4.3",
+      prisma: "^5.7.0",
+      "@prisma/client": "^5.7.0"
+    },
+    devDependencies: {
+      nodemon: "^3.0.0"
+    }
+  }, null, 2);
+};
+
+const generateExpressServer = () => {
+  return `const express = require('express');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+app.use(cors());
+app.use(express.json());
+
+// Basic route
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'Backend is running!' });
+});
+
+// Auth routes will be added here
+
+app.listen(PORT, () => {
+  console.log(\`Backend server running on port \${PORT}\`);
+});`;
+};
+
+const generatePrismaSchema = () => {
+  return `// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       String @id @default(cuid())
+  email    String @unique
+  name     String?
+  password String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}`;
+};
+
+const generateAuthRoutes = () => {
+  return `const express = require('express');
+const router = express.Router();
+
+router.post('/register', async (req, res) => {
+  // Registration logic here
+  res.json({ message: 'Registration endpoint' });
+});
+
+router.post('/login', async (req, res) => {
+  // Login logic here  
+  res.json({ message: 'Login endpoint' });
+});
+
+module.exports = router;`;
+};
+
+const generateApiRoutes = () => {
+  return `const express = require('express');
+const router = express.Router();
+
+router.get('/users', async (req, res) => {
+  // Get users logic
+  res.json({ message: 'Users endpoint' });
+});
+
+module.exports = router;`;
+};
+
+const generateAuthMiddleware = () => {
+  return `const jwt = require('jsonwebtoken');
+
+const authMiddleware = (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+module.exports = authMiddleware;`;
+};
+
+const generateAuthContext = () => {
+  return `import React, { createContext, useContext, useState } from 'react';
+
+const AuthContext = createContext();
+
+export const useAuth = () => useContext(AuthContext);
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  
+  const login = async (email, password) => {
+    // Login logic here
+    console.log('Login:', email);
+  };
+  
+  const logout = () => {
+    setUser(null);
+  };
+  
+  return (
+    <AuthContext.Provider value={{ user, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};`;
+};
+
+const generateDashboard = () => {
+  return `import React from 'react';
+
+const Dashboard = () => {
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+        <div className="mt-6">
+          <p className="text-gray-600">Welcome to your dashboard!</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;`;
+};
+
+const generateLogin = () => {
+  return `import React, { useState } from 'react';
+
+const Login = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    console.log('Login attempt:', email);
+  };
+  
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="max-w-md w-full space-y-8">
+        <h2 className="text-3xl font-bold text-center">Sign In</h2>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md"
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md"
+          />
+          <button
+            type="submit"
+            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700"
+          >
+            Sign In
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default Login;`;
+};
+
+const generateDockerCompose = () => {
+  return `version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:`;
+};
+
+const generateEnvExample = () => {
+  return `# Database
+DATABASE_URL="postgresql://postgres:password@localhost:5432/myapp"
+
+# JWT
+JWT_SECRET="your-secret-key-here"
+
+# API
+PORT=3001`;
+};
+
+
+// MISSING GENERATOR FUNCTIONS - Add these to the end of server.js
+
+const generateReadme = (complexity) => {
+  return `# VibeCode Generated Project
+
+This project was generated using VibeCode AI.
+
+## Complexity: ${complexity}
+
+## Quick Start
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+## Deploy
+
+### Vercel
+\`\`\`bash
+npm run build
+# Upload to Vercel
+\`\`\`
+
+### Netlify
+\`\`\`bash
+npm run build
+# Upload build folder to Netlify
+\`\`\`
+
+## Generated with ❤️ by VibeCode
+`;
+};
+
+const generateGitignore = () => {
+  return `# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+build/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+`;
+};
+
+
+// MISSING GENERATOR FUNCTIONS - Add these to the end of server.js
+
+const generateReadme = (complexity) => {
+  return `# VibeCode Generated Project
+
+This project was generated using VibeCode AI.
+
+## Complexity: ${complexity}
+
+## Quick Start
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+## Deploy
+
+### Vercel
+\`\`\`bash
+npm run build
+# Upload to Vercel
+\`\`\`
+
+### Netlify
+\`\`\`bash
+npm run build
+# Upload build folder to Netlify
+\`\`\`
+
+## Generated with ❤️ by VibeCode
+`;
+};
+
+const generateGitignore = () => {
+  return `# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+build/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+`;
+};
+
