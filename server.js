@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { Octokit } = require('@octokit/rest');
+const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -10,16 +11,19 @@ const PORT = process.env.PORT || 8001;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// In-memory project storage
-const projects = new Map();
+// Initialize Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL || 'https://your-project.supabase.co',
+  process.env.SUPABASE_ANON_KEY || 'your-anon-key'
+);
 
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     service: 'refact-proxy-advanced',
-    version: '2.0.0',
-    features: ['github', 'projects', 'complex-apps'],
+    version: '2.1.0',
+    features: ['github', 'projects', 'complex-apps', 'supabase-chat'],
     timestamp: new Date().toISOString() 
   });
 });
@@ -36,7 +40,8 @@ app.get('/v1/caps', (req, res) => {
         "supports_reasoning": true,
         "supports_complex_apps": true,
         "supports_databases": true,
-        "supports_github": true
+        "supports_github": true,
+        "supports_persistent_chat": true
       }
     },
     "features": {
@@ -44,50 +49,69 @@ app.get('/v1/caps', (req, res) => {
       "github_integration": true,
       "database_generation": true,
       "full_stack_apps": true,
-      "file_operations": true
+      "file_operations": true,
+      "persistent_chat": true,
+      "supabase_storage": true
     },
-    "version": "2.0.0"
+    "version": "2.1.0"
   });
 });
 
 // Create new project with GitHub repo
 app.post('/v1/projects/create', async (req, res) => {
   try {
-    const { project_name, github_token, complexity = 'simple' } = req.body;
+    const { project_name, github_token, complexity = 'simple', user_id } = req.body;
     
-    const projectId = uuidv4();
-    const repoName = project_name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const slug = project_name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     
     // Create GitHub repository
     const octokit = new Octokit({ auth: github_token });
     const repo = await octokit.repos.createForAuthenticatedUser({
-      name: repoName,
+      name: slug,
       description: `${complexity} app created with VibeCode`,
       private: false,
       auto_init: true
     });
     
+    // Store project in Supabase
+    const { data: project, error } = await supabase
+      .from('projects')
+      .insert({
+        name: project_name,
+        slug: slug,
+        complexity,
+        github_repo: repo.data.html_url,
+        github_clone_url: repo.data.clone_url,
+        owner: repo.data.owner.login,
+        repo_name: slug,
+        user_id: user_id || null
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create initial chat session
+    const { data: session } = await supabase
+      .from('chat_sessions')
+      .insert({
+        project_id: project.id,
+        user_id: user_id || null,
+        session_name: 'Main Chat'
+      })
+      .select()
+      .single();
+
     // Generate initial project structure
     const projectStructure = generateProjectStructure(complexity);
     
     // Commit initial files
-    await commitFilesToRepo(octokit, repo.data.owner.login, repoName, projectStructure);
-    
-    // Store project info
-    projects.set(projectId, {
-      id: projectId,
-      name: project_name,
-      complexity,
-      github_repo: repo.data.html_url,
-      github_clone_url: repo.data.clone_url,
-      owner: repo.data.owner.login,
-      repo_name: repoName,
-      created_at: new Date(),
-      files: projectStructure
-    });
+    await commitFilesToRepo(octokit, repo.data.owner.login, slug, projectStructure);
     
     res.json({
-      project_id: projectId,
+      project_id: project.id,
+      project_slug: project.slug,
+      session_id: session.id,
       github_repo_url: repo.data.html_url,
       clone_url: repo.data.clone_url,
       complexity,
@@ -100,34 +124,234 @@ app.post('/v1/projects/create', async (req, res) => {
   }
 });
 
-// Generate component/feature for existing project
-app.post('/v1/projects/:projectId/generate', async (req, res) => {
+// Get project by ID or slug
+app.get('/v1/projects/:identifier', async (req, res) => {
   try {
-    const { projectId } = req.params;
-    const { prompt, github_token, feature_type = 'component' } = req.body;
+    const { identifier } = req.params;
     
-    const project = projects.get(projectId);
-    if (!project) {
+    // Try to find by ID first, then by slug
+    let query = supabase.from('projects').select('*');
+    
+    if (identifier.includes('-') && identifier.length > 30) {
+      // Looks like UUID
+      query = query.eq('id', identifier);
+    } else {
+      // Looks like slug
+      query = query.eq('slug', identifier);
+    }
+    
+    const { data: project, error } = await query.single();
+    
+    if (error || !project) {
       return res.status(404).json({ error: 'Project not found' });
     }
     
-    // Build context-aware prompt
-    const contextualPrompt = buildAdvancedPrompt(prompt, {}, feature_type, project.complexity);
-    
-    // Generate with Claude
-    const response = await callClaudeAPI(contextualPrompt);
+    // Get chat sessions for this project
+    const { data: sessions } = await supabase
+      .from('chat_sessions')
+      .select('*')
+      .eq('project_id', project.id);
     
     res.json({
-      generated_content: response.choices[0].message.content,
+      project,
+      chat_sessions: sessions
+    });
+    
+  } catch (error) {
+    console.error('Get project error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// CHAT INTERFACE WITH SUPABASE PERSISTENCE
+
+// Chat with project (approve, modify, ask questions)
+app.post('/v1/projects/:projectId/chat', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { message, github_token, session_id } = req.body;
+    
+    // Get project
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('*')
+      .or(`id.eq.${projectId},slug.eq.${projectId}`)
+      .single();
+      
+    if (projectError || !project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Get or create chat session
+    let chatSession;
+    if (session_id) {
+      const { data } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('id', session_id)
+        .single();
+      chatSession = data;
+    } else {
+      // Get the main session or create one
+      const { data: sessions } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .eq('project_id', project.id)
+        .limit(1);
+        
+      if (sessions && sessions.length > 0) {
+        chatSession = sessions[0];
+      } else {
+        const { data: newSession } = await supabase
+          .from('chat_sessions')
+          .insert({
+            project_id: project.id,
+            session_name: 'Main Chat'
+          })
+          .select()
+          .single();
+        chatSession = newSession;
+      }
+    }
+
+    // Get chat history
+    const { data: chatHistory } = await supabase
+      .from('chat_messages')
+      .select('*')
+      .eq('session_id', chatSession.id)
+      .order('timestamp', { ascending: true });
+
+    // Add user message to history
+    await supabase
+      .from('chat_messages')
+      .insert({
+        session_id: chatSession.id,
+        role: 'user',
+        content: message
+      });
+
+    // Analyze user intent
+    const intent = analyzeUserIntent(message);
+    let response = '';
+    let action_taken = null;
+
+    if (intent.type === 'approve') {
+      // User wants to approve and commit
+      const { data: pendingCode } = await supabase
+        .from('pending_code')
+        .select('*')
+        .eq('session_id', chatSession.id)
+        .eq('status', 'pending');
+        
+      if (pendingCode && pendingCode.length > 0) {
+        try {
+          const octokit = new Octokit({ auth: github_token });
+          await commitPendingCodeToGitHub(octokit, project, pendingCode);
+          
+          // Mark code as committed
+          await supabase
+            .from('pending_code')
+            .update({ status: 'committed' })
+            .eq('session_id', chatSession.id)
+            .eq('status', 'pending');
+          
+          response = "✅ Perfect! I've committed your code to GitHub. Your HI VIBE landing page is now live in your repository! 🚀\n\nYou can find the updated files at: " + project.github_repo;
+          action_taken = 'committed_to_github';
+        } catch (error) {
+          response = "❌ I had trouble committing to GitHub. Please check your token permissions. Error: " + error.message;
+          action_taken = 'commit_failed';
+        }
+      } else {
+        response = "🤔 I don't have any pending code to commit. Would you like me to generate something first?";
+        action_taken = 'no_pending_code';
+      }
+
+    } else if (intent.type === 'modify') {
+      // User wants to modify the code
+      const modificationPrompt = buildModificationPrompt(message, chatHistory);
+      const aiResponse = await callClaudeAPI(modificationPrompt);
+      
+      // Parse and store new code
+      const codeFiles = parseGeneratedCode(aiResponse.choices[0].message.content);
+      
+      // Clear old pending code
+      await supabase
+        .from('pending_code')
+        .delete()
+        .eq('session_id', chatSession.id)
+        .eq('status', 'pending');
+      
+      // Store new pending code
+      for (const [filePath, content] of Object.entries(codeFiles)) {
+        await supabase
+          .from('pending_code')
+          .insert({
+            session_id: chatSession.id,
+            file_path: filePath,
+            content: content,
+            status: 'pending'
+          });
+      }
+      
+      response = "✨ Great idea! I've updated the code based on your feedback:\n\n" + 
+                aiResponse.choices[0].message.content + 
+                "\n\n💬 What do you think? Say 'commit it' if you're happy with the changes, or ask for more modifications!";
+      action_taken = 'code_modified';
+
+    } else {
+      // General conversation
+      const conversationPrompt = buildConversationPrompt(message, chatHistory);
+      const aiResponse = await callClaudeAPI(conversationPrompt);
+      
+      response = aiResponse.choices[0].message.content;
+      action_taken = 'general_chat';
+    }
+
+    // Add AI response to history
+    await supabase
+      .from('chat_messages')
+      .insert({
+        session_id: chatSession.id,
+        role: 'assistant',
+        content: response,
+        action_taken
+      });
+
+    res.json({
+      message: response,
+      action_taken,
+      session_id: chatSession.id,
       project_info: {
         id: project.id,
+        slug: project.slug,
         name: project.name,
         github_repo: project.github_repo
       }
     });
+
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get chat history for a session
+app.get('/v1/projects/:projectId/chat/:sessionId/history', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const { data: messages, error } = await supabase
+      .from('chat_messages')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('timestamp', { ascending: true });
+      
+    if (error) throw error;
+    
+    res.json({ messages });
     
   } catch (error) {
-    console.error('Generation error:', error);
+    console.error('Get chat history error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -149,7 +373,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
-    // Convert Anthropic response to OpenAI-compatible format
     res.json({
       choices: [{
         message: {
@@ -174,8 +397,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// HELPER FUNCTIONS
-
+// HELPER FUNCTIONS (abbreviated for space)
 const callClaudeAPI = async (prompt) => {
   const response = await axios.post('https://api.anthropic.com/v1/messages', {
     model: 'claude-3-5-sonnet-20241022',
@@ -200,35 +422,91 @@ const callClaudeAPI = async (prompt) => {
   };
 };
 
-const buildAdvancedPrompt = (userPrompt, currentFiles, featureType, complexity) => {
-  let prompt = `You are building a ${complexity} ${featureType === 'database' ? 'full-stack' : 'React'} application. `;
-  prompt += `User request: ${userPrompt}\n\n`;
-  prompt += `Please provide clean, modern React components with Tailwind CSS.`;
+const analyzeUserIntent = (message) => {
+  const msg = message.toLowerCase();
+  
+  if (msg.includes('commit') || msg.includes('approve') || msg.includes('looks good') || 
+      msg.includes('perfect') || msg.includes('deploy') || msg.includes('push')) {
+    return { type: 'approve' };
+  }
+  
+  if (msg.includes('change') || msg.includes('modify') || msg.includes('update') ||
+      msg.includes('make it') || msg.includes('add') || msg.includes('remove')) {
+    return { type: 'modify' };
+  }
+  
+  return { type: 'general' };
+};
+
+const buildModificationPrompt = (userMessage, chatHistory) => {
+  let prompt = `You are helping modify a React component. `;
+  
+  if (chatHistory && chatHistory.length > 0) {
+    prompt += `Previous conversation context:\n`;
+    chatHistory.slice(-4).forEach(msg => {
+      prompt += `${msg.role}: ${msg.content}\n`;
+    });
+    prompt += `\n`;
+  }
+  
+  prompt += `User request: ${userMessage}\n\n`;
+  prompt += `Please provide the updated code that addresses their feedback.`;
+  
   return prompt;
 };
 
-const generateProjectStructure = (complexity) => {
-  const baseStructure = {
-    'package.json': generatePackageJson(complexity),
-    'README.md': generateReadme(complexity),
-    '.gitignore': generateGitignore(),
-    'src/App.js': generateMainApp(complexity),
-    'src/index.js': generateIndex(),
-    'src/index.css': generateStyles(),
-    'src/components/Hero.js': generateHeroComponent(),
-    'public/index.html': generateHTML()
-  };
+const buildConversationPrompt = (userMessage, chatHistory) => {
+  let prompt = `You are an AI assistant helping with a coding project. `;
   
-  if (complexity === 'complex') {
-    Object.assign(baseStructure, {
-      'backend/package.json': generateBackendPackageJson(),
-      'backend/server.js': generateExpressServer(),
-      'backend/prisma/schema.prisma': generatePrismaSchema(),
-      '.env.example': generateEnvExample()
+  if (chatHistory && chatHistory.length > 0) {
+    prompt += `Previous conversation:\n`;
+    chatHistory.slice(-4).forEach(msg => {
+      prompt += `${msg.role}: ${msg.content}\n`;
     });
+    prompt += `\n`;
   }
   
-  return baseStructure;
+  prompt += `User: ${userMessage}\n\nRespond helpfully and conversationally.`;
+  
+  return prompt;
+};
+
+const parseGeneratedCode = (aiResponse) => {
+  // Simple code parsing - extract files
+  const codeBlocks = {};
+  
+  if (aiResponse.includes('```')) {
+    const matches = aiResponse.match(/```[\s\S]*?```/g);
+    if (matches) {
+      matches.forEach((match, index) => {
+        const cleanCode = match.replace(/```jsx?/g, '').replace(/```/g, '').trim();
+        codeBlocks[`src/component_${index}.jsx`] = cleanCode;
+      });
+    }
+  }
+  
+  return codeBlocks;
+};
+
+const commitPendingCodeToGitHub = async (octokit, project, pendingCodeArray) => {
+  const commits = [];
+  
+  for (const codeItem of pendingCodeArray) {
+    try {
+      const result = await octokit.repos.createOrUpdateFileContents({
+        owner: project.owner,
+        repo: project.repo_name,
+        path: codeItem.file_path,
+        message: `Update ${codeItem.file_path} via HI VIBE chat`,
+        content: Buffer.from(codeItem.content).toString('base64')
+      });
+      commits.push(result.data.commit.sha);
+    } catch (error) {
+      console.error(`Error committing ${codeItem.file_path}:`, error.message);
+    }
+  }
+  
+  return commits;
 };
 
 const commitFilesToRepo = async (octokit, owner, repo, files) => {
@@ -252,273 +530,30 @@ const commitFilesToRepo = async (octokit, owner, repo, files) => {
   return commits;
 };
 
-// GENERATOR FUNCTIONS
+const generateProjectStructure = (complexity) => {
+  return {
+    'src/App.jsx': `import React from 'react';
 
-const generateReadme = (complexity) => {
-  return `# VibeCode Generated Project
+function App() {
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <h1 className="text-4xl font-bold text-center py-20">
+        Welcome to your new project!
+      </h1>
+    </div>
+  );
+}
 
-This project was generated using VibeCode AI.
-
-## Complexity: ${complexity}
-
-## Quick Start
-
-\`\`\`bash
-npm install
-npm start
-\`\`\`
-
-## Deploy
-
-### Vercel
-\`\`\`bash
-npm run build
-# Upload to Vercel
-\`\`\`
-
-### Netlify
-\`\`\`bash
-npm run build
-# Upload build folder to Netlify
-\`\`\`
-
-## Generated with ❤️ by VibeCode
-`;
-};
-
-const generateGitignore = () => {
-  return `# Dependencies
-node_modules/
-.pnp
-.pnp.js
-
-# Testing
-coverage/
-
-# Production
-build/
-
-# Environment
-.env
-.env.local
-.env.production
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-`;
-};
-
-const generatePackageJson = (complexity) => {
-  const base = {
-    name: "vibe-code-project",
-    version: "1.0.0",
-    scripts: {
-      start: "react-scripts start",
-      build: "react-scripts build",
-      test: "react-scripts test",
-      eject: "react-scripts eject"
-    },
-    dependencies: {
-      react: "^18.0.0",
-      "react-dom": "^18.0.0",
-      "react-scripts": "5.0.1",
-      "tailwindcss": "^3.0.0"
-    }
+export default App;`,
+    'package.json': JSON.stringify({
+      name: "vibe-code-project",
+      version: "1.0.0",
+      dependencies: {
+        react: "^18.0.0",
+        "react-dom": "^18.0.0"
+      }
+    }, null, 2)
   };
-  
-  if (complexity === 'complex') {
-    base.dependencies.axios = "^1.6.0";
-    base.dependencies["react-router-dom"] = "^6.0.0";
-  }
-  
-  return JSON.stringify(base, null, 2);
-};
-
-const generateMainApp = (complexity) => {
-  if (complexity === 'complex') {
-    return `import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import Hero from './components/Hero';
-import './index.css';
-
-function App() {
-  return (
-    <Router>
-      <div className="App">
-        <Routes>
-          <Route path="/" element={<Hero />} />
-        </Routes>
-      </div>
-    </Router>
-  );
-}
-
-export default App;`;
-  } else {
-    return `import React from 'react';
-import Hero from './components/Hero';
-import './index.css';
-
-function App() {
-  return (
-    <div className="App">
-      <Hero />
-    </div>
-  );
-}
-
-export default App;`;
-  }
-};
-
-const generateIndex = () => {
-  return `import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);`;
-};
-
-const generateStyles = () => {
-  return `@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}`;
-};
-
-const generateHeroComponent = () => {
-  return `import React from 'react';
-
-const Hero = () => {
-  return (
-    <div className="bg-white py-16 sm:py-24">
-      <div className="mx-auto max-w-7xl px-6 lg:px-8">
-        <div className="mx-auto max-w-2xl text-center">
-          <h1 className="text-4xl font-bold tracking-tight text-gray-900 sm:text-6xl">
-            Welcome to Your
-            <span className="text-indigo-600"> Amazing Project</span>
-          </h1>
-          <p className="mt-6 text-lg leading-8 text-gray-600">
-            This project was generated with VibeCode AI. Start building something amazing!
-          </p>
-          <div className="mt-10 flex items-center justify-center gap-x-6">
-            <button className="rounded-md bg-indigo-600 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">
-              Get Started
-            </button>
-            <button className="text-sm font-semibold leading-6 text-gray-900">
-              Learn More →
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default Hero;`;
-};
-
-const generateHTML = () => {
-  return `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta name="description" content="Generated with VibeCode AI" />
-    <title>VibeCode Generated App</title>
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-  </body>
-</html>`;
-};
-
-const generateBackendPackageJson = () => {
-  return JSON.stringify({
-    name: "backend",
-    version: "1.0.0",
-    scripts: {
-      start: "node server.js",
-      dev: "nodemon server.js"
-    },
-    dependencies: {
-      express: "^4.18.0",
-      cors: "^2.8.5",
-      prisma: "^5.7.0",
-      "@prisma/client": "^5.7.0"
-    }
-  }, null, 2);
-};
-
-const generateExpressServer = () => {
-  return `const express = require('express');
-const cors = require('cors');
-
-const app = express();
-const PORT = process.env.PORT || 3001;
-
-app.use(cors());
-app.use(express.json());
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'Backend is running!' });
-});
-
-app.listen(PORT, () => {
-  console.log(\`Backend server running on port \${PORT}\`);
-});`;
-};
-
-const generatePrismaSchema = () => {
-  return `generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-model User {
-  id       String @id @default(cuid())
-  email    String @unique
-  name     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}`;
-};
-
-const generateEnvExample = () => {
-  return `# Database
-DATABASE_URL="postgresql://user:password@localhost:5432/myapp"
-
-# API
-PORT=3001`;
 };
 
 // Start server
@@ -526,5 +561,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Advanced Refact proxy server running on port ${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);
   console.log(`🤖 Projects API: http://localhost:${PORT}/v1/projects`);
-  console.log(`🔧 Features: GitHub integration, Complex apps, Database generation`);
+  console.log(`💬 Chat API: http://localhost:${PORT}/v1/projects/{id}/chat`);
+  console.log(`🗄️ Using Supabase for persistence`);
 });

@@ -6,13 +6,7 @@
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "@octokit/rest": "^20.0.0",
-    "prisma": "^5.7.0",
-    "@prisma/client": "^5.7.0",
-    "simple-git": "^3.20.0",
-    "archiver": "^6.0.0",
-    "fs-extra": "^11.0.0",
-    "uuid": "^9.0.0",
-    "jsonwebtoken": "^9.0.0",
-    "bcryptjs": "^2.4.3"
+    "@supabase/supabase-js": "^2.39.0",
+    "uuid": "^9.0.0"
   }
 }
