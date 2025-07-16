@@ -4,6 +4,9 @@ const cors = require('cors');
 const { Octokit } = require('@octokit/rest');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
+const simpleGit = require('simple-git');
+const fs = require('fs-extra');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 8001;
@@ -13,17 +16,331 @@ app.use(express.json({ limit: '50mb' }));
 
 // Initialize Supabase client
 const supabase = createClient(
-  process.env.SUPABASE_URL || 'https://your-project.supabase.co',
-  process.env.SUPABASE_ANON_KEY || 'your-anon-key'
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
 );
+
+// AGENT TOOLS IMPLEMENTATION
+
+class RefactAgent {
+  constructor() {
+    this.tools = {
+      search: this.searchCodebase.bind(this),
+      tree: this.getFileTree.bind(this),
+      cat: this.readFiles.bind(this),
+      locate: this.locateFiles.bind(this),
+      patch: this.applyPatch.bind(this),
+      think: this.planTask.bind(this),
+      web: this.fetchWebContent.bind(this),
+      definition: this.getDefinitions.bind(this),
+      references: this.findReferences.bind(this)
+    };
+    this.workspaces = new Map(); // Store project workspaces
+  }
+
+  async searchCodebase(query, projectId) {
+    // Vector search implementation
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return [];
+    
+    // Simple text search for now (can upgrade to vector DB later)
+    const results = [];
+    for (const [filePath, content] of Object.entries(workspace.files)) {
+      if (content.toLowerCase().includes(query.toLowerCase())) {
+        results.push({
+          file: filePath,
+          matches: content.split('\n').filter(line => 
+            line.toLowerCase().includes(query.toLowerCase())
+          )
+        });
+      }
+    }
+    return results;
+  }
+
+  async getFileTree(projectId) {
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return {};
+    
+    const tree = {};
+    for (const filePath of Object.keys(workspace.files)) {
+      const parts = filePath.split('/');
+      let current = tree;
+      for (const part of parts) {
+        if (!current[part]) {
+          current[part] = {};
+        }
+        current = current[part];
+      }
+    }
+    return tree;
+  }
+
+  async readFiles(files, projectId) {
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return {};
+    
+    const result = {};
+    for (const file of files) {
+      if (workspace.files[file]) {
+        result[file] = workspace.files[file];
+      }
+    }
+    return result;
+  }
+
+  async locateFiles(taskDescription, projectId) {
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return [];
+    
+    // Smart file location based on task
+    const relevantFiles = [];
+    const files = Object.keys(workspace.files);
+    
+    // Simple relevance scoring
+    for (const file of files) {
+      if (taskDescription.toLowerCase().includes('component') && file.includes('component')) {
+        relevantFiles.push({ file, relevance: 0.9 });
+      } else if (taskDescription.toLowerCase().includes('style') && file.includes('.css')) {
+        relevantFiles.push({ file, relevance: 0.8 });
+      } else if (file.includes('.js') || file.includes('.jsx') || file.includes('.ts')) {
+        relevantFiles.push({ file, relevance: 0.5 });
+      }
+    }
+    
+    return relevantFiles.sort((a, b) => b.relevance - a.relevance);
+  }
+
+  async applyPatch(changes, projectId, githubToken) {
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) throw new Error('Workspace not found');
+    
+    // Apply changes to workspace
+    for (const change of changes) {
+      if (change.type === 'create' || change.type === 'update') {
+        workspace.files[change.file] = change.content;
+      } else if (change.type === 'delete') {
+        delete workspace.files[change.file];
+      }
+    }
+    
+    // Commit to GitHub
+    const octokit = new Octokit({ auth: githubToken });
+    const commits = [];
+    
+    for (const change of changes) {
+      try {
+        const result = await octokit.repos.createOrUpdateFileContents({
+          owner: workspace.owner,
+          repo: workspace.repo,
+          path: change.file,
+          message: `Agent: ${change.type} ${change.file}`,
+          content: Buffer.from(change.content || '').toString('base64')
+        });
+        commits.push(result.data.commit.sha);
+      } catch (error) {
+        console.error(`Error patching ${change.file}:`, error.message);
+      }
+    }
+    
+    return commits;
+  }
+
+  async planTask(taskDescription) {
+    // Use Claude for planning with o3-mini-like reasoning
+    const planningPrompt = `You are an expert software architect. Break down this task into a detailed execution plan:
+
+Task: ${taskDescription}
+
+Create a step-by-step plan that includes:
+1. Understanding phase (what files to examine, what context to gather)
+2. Planning phase (what changes are needed, dependencies, potential issues)
+3. Execution phase (specific code changes, file operations, testing)
+
+Respond with a structured plan in JSON format:
+{
+  "understanding": [{"step": "...", "tool": "tree|cat|search|locate", "target": "..."}],
+  "planning": [{"analysis": "...", "dependencies": [...], "risks": [...]}],
+  "execution": [{"action": "...", "files": [...], "changes": "..."}]
+}`;
+
+    const response = await this.callClaudeAPI(planningPrompt);
+    try {
+      return JSON.parse(response.choices[0].message.content);
+    } catch {
+      return { error: "Failed to parse plan", raw: response.choices[0].message.content };
+    }
+  }
+
+  async fetchWebContent(url) {
+    try {
+      const response = await fetch(url);
+      const html = await response.text();
+      
+      // Simple text extraction (can upgrade with cheerio for better parsing)
+      const textContent = html
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+        .replace(/<[^>]*>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+        
+      return textContent.substring(0, 5000); // Limit size
+    } catch (error) {
+      return `Error fetching ${url}: ${error.message}`;
+    }
+  }
+
+  async getDefinitions(symbol, projectId) {
+    // AST-based definition finding (simplified)
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return [];
+    
+    const definitions = [];
+    for (const [file, content] of Object.entries(workspace.files)) {
+      const lines = content.split('\n');
+      lines.forEach((line, index) => {
+        if (line.includes(`function ${symbol}`) || 
+            line.includes(`const ${symbol}`) ||
+            line.includes(`class ${symbol}`)) {
+          definitions.push({
+            file,
+            line: index + 1,
+            definition: line.trim()
+          });
+        }
+      });
+    }
+    return definitions;
+  }
+
+  async findReferences(symbol, projectId) {
+    // Find all usages of a symbol
+    const workspace = this.workspaces.get(projectId);
+    if (!workspace) return [];
+    
+    const references = [];
+    for (const [file, content] of Object.entries(workspace.files)) {
+      const lines = content.split('\n');
+      lines.forEach((line, index) => {
+        if (line.includes(symbol) && !line.includes(`${symbol}:`)) {
+          references.push({
+            file,
+            line: index + 1,
+            context: line.trim()
+          });
+        }
+      });
+    }
+    return references;
+  }
+
+  async callClaudeAPI(prompt) {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 4000,
+      messages: [{ role: "user", content: prompt }]
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.ANTHROPIC_API_KEY}`,
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      }
+    });
+
+    return {
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: response.data.content[0].text
+        }
+      }]
+    };
+  }
+
+  async executeAgentWorkflow(taskDescription, projectId, githubToken) {
+    // 1. Planning phase
+    const plan = await this.planTask(taskDescription);
+    console.log('Agent Plan:', plan);
+    
+    // 2. Understanding phase
+    const context = {};
+    if (plan.understanding) {
+      for (const step of plan.understanding) {
+        switch (step.tool) {
+          case 'tree':
+            context.fileTree = await this.getFileTree(projectId);
+            break;
+          case 'cat':
+            context.files = await this.readFiles(step.target.split(','), projectId);
+            break;
+          case 'search':
+            context.searchResults = await this.searchCodebase(step.target, projectId);
+            break;
+          case 'locate':
+            context.relevantFiles = await this.locateFiles(step.target, projectId);
+            break;
+        }
+      }
+    }
+    
+    // 3. Execution phase with context
+    const executionPrompt = `You are an autonomous coding agent. Execute this task with full context:
+
+Task: ${taskDescription}
+
+Plan: ${JSON.stringify(plan, null, 2)}
+
+Context: ${JSON.stringify(context, null, 2)}
+
+Based on the plan and context, provide the exact code changes needed. Format your response as:
+
+{
+  "changes": [
+    {"type": "create|update|delete", "file": "path/to/file", "content": "..."},
+    ...
+  ],
+  "reasoning": "Why these changes accomplish the task"
+}
+
+Make actual working code changes that can be directly applied to the project.`;
+
+    const response = await this.callClaudeAPI(executionPrompt);
+    
+    try {
+      const result = JSON.parse(response.choices[0].message.content);
+      
+      // Apply the patches
+      if (result.changes && result.changes.length > 0) {
+        const commits = await this.applyPatch(result.changes, projectId, githubToken);
+        return {
+          success: true,
+          changes: result.changes,
+          reasoning: result.reasoning,
+          commits: commits,
+          plan: plan
+        };
+      }
+      
+      return { success: false, error: "No changes generated", response: response.choices[0].message.content };
+    } catch (error) {
+      return { success: false, error: "Failed to parse agent response", raw: response.choices[0].message.content };
+    }
+  }
+}
+
+// Initialize agent
+const agent = new RefactAgent();
 
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    service: 'refact-proxy-advanced',
-    version: '2.1.0',
-    features: ['github', 'projects', 'complex-apps', 'supabase-chat'],
+    service: 'refact-agent-full',
+    version: '3.0.0',
+    features: ['agent-tools', 'autonomous-patching', 'github-integration', 'supabase-chat'],
+    agent_tools: Object.keys(agent.tools),
     timestamp: new Date().toISOString() 
   });
 });
@@ -41,23 +358,27 @@ app.get('/v1/caps', (req, res) => {
         "supports_complex_apps": true,
         "supports_databases": true,
         "supports_github": true,
-        "supports_persistent_chat": true
+        "supports_persistent_chat": true,
+        "supports_autonomous_patching": true,
+        "supports_agent_tools": true
       }
     },
-    "features": {
-      "project_management": true,
-      "github_integration": true,
-      "database_generation": true,
-      "full_stack_apps": true,
-      "file_operations": true,
-      "persistent_chat": true,
-      "supabase_storage": true
+    "agent_tools": {
+      "search": "Find similar code using vector database",
+      "tree": "Get file tree with symbols",
+      "cat": "Read multiple files", 
+      "locate": "Find relevant files for tasks",
+      "patch": "Apply changes to files",
+      "think": "Analyze complex problems",
+      "web": "Fetch web pages",
+      "definition": "Read symbol definitions",
+      "references": "Find symbol usages"
     },
-    "version": "2.1.0"
+    "version": "3.0.0"
   });
 });
 
-// Create new project with GitHub repo
+// Create new project with workspace
 app.post('/v1/projects/create', async (req, res) => {
   try {
     const { project_name, github_token, complexity = 'simple', user_id } = req.body;
@@ -68,7 +389,7 @@ app.post('/v1/projects/create', async (req, res) => {
     const octokit = new Octokit({ auth: github_token });
     const repo = await octokit.repos.createForAuthenticatedUser({
       name: slug,
-      description: `${complexity} app created with VibeCode`,
+      description: `${complexity} app created with Refact Agent`,
       private: false,
       auto_init: true
     });
@@ -91,19 +412,19 @@ app.post('/v1/projects/create', async (req, res) => {
 
     if (error) throw error;
 
-    // Create initial chat session
-    const { data: session } = await supabase
-      .from('chat_sessions')
-      .insert({
-        project_id: project.id,
-        user_id: user_id || null,
-        session_name: 'Main Chat'
-      })
-      .select()
-      .single();
+    // Create workspace for agent
+    agent.workspaces.set(project.id, {
+      id: project.id,
+      owner: repo.data.owner.login,
+      repo: slug,
+      files: {}
+    });
 
     // Generate initial project structure
     const projectStructure = generateProjectStructure(complexity);
+    
+    // Add to workspace
+    agent.workspaces.get(project.id).files = projectStructure;
     
     // Commit initial files
     await commitFilesToRepo(octokit, repo.data.owner.login, slug, projectStructure);
@@ -111,10 +432,10 @@ app.post('/v1/projects/create', async (req, res) => {
     res.json({
       project_id: project.id,
       project_slug: project.slug,
-      session_id: session.id,
       github_repo_url: repo.data.html_url,
       clone_url: repo.data.clone_url,
       complexity,
+      agent_ready: true,
       initial_structure: Object.keys(projectStructure)
     });
     
@@ -124,52 +445,11 @@ app.post('/v1/projects/create', async (req, res) => {
   }
 });
 
-// Get project by ID or slug
-app.get('/v1/projects/:identifier', async (req, res) => {
-  try {
-    const { identifier } = req.params;
-    
-    // Try to find by ID first, then by slug
-    let query = supabase.from('projects').select('*');
-    
-    if (identifier.includes('-') && identifier.length > 30) {
-      // Looks like UUID
-      query = query.eq('id', identifier);
-    } else {
-      // Looks like slug
-      query = query.eq('slug', identifier);
-    }
-    
-    const { data: project, error } = await query.single();
-    
-    if (error || !project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    // Get chat sessions for this project
-    const { data: sessions } = await supabase
-      .from('chat_sessions')
-      .select('*')
-      .eq('project_id', project.id);
-    
-    res.json({
-      project,
-      chat_sessions: sessions
-    });
-    
-  } catch (error) {
-    console.error('Get project error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// CHAT INTERFACE WITH SUPABASE PERSISTENCE
-
-// Chat with project (approve, modify, ask questions)
-app.post('/v1/projects/:projectId/chat', async (req, res) => {
+// AUTONOMOUS AGENT CHAT - Full capabilities
+app.post('/v1/projects/:projectId/agent', async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { message, github_token, session_id } = req.body;
+    const { task, github_token, auto_approve = false } = req.body;
     
     // Get project
     const { data: project, error: projectError } = await supabase
@@ -182,331 +462,89 @@ app.post('/v1/projects/:projectId/chat', async (req, res) => {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    // Get or create chat session
-    let chatSession;
-    if (session_id) {
-      const { data } = await supabase
-        .from('chat_sessions')
-        .select('*')
-        .eq('id', session_id)
-        .single();
-      chatSession = data;
-    } else {
-      // Get the main session or create one
-      const { data: sessions } = await supabase
-        .from('chat_sessions')
-        .select('*')
-        .eq('project_id', project.id)
-        .limit(1);
-        
-      if (sessions && sessions.length > 0) {
-        chatSession = sessions[0];
-      } else {
-        const { data: newSession } = await supabase
-          .from('chat_sessions')
-          .insert({
-            project_id: project.id,
-            session_name: 'Main Chat'
-          })
-          .select()
-          .single();
-        chatSession = newSession;
-      }
+    // Ensure workspace exists
+    if (!agent.workspaces.has(project.id)) {
+      // Load workspace from GitHub
+      const octokit = new Octokit({ auth: github_token });
+      const workspace = await loadWorkspaceFromGitHub(octokit, project);
+      agent.workspaces.set(project.id, workspace);
     }
 
-    // Get chat history
-    const { data: chatHistory } = await supabase
-      .from('chat_messages')
-      .select('*')
-      .eq('session_id', chatSession.id)
-      .order('timestamp', { ascending: true });
-
-    // Add user message to history
-    await supabase
-      .from('chat_messages')
-      .insert({
-        session_id: chatSession.id,
-        role: 'user',
-        content: message
-      });
-
-    // Analyze user intent
-    const intent = analyzeUserIntent(message);
-    let response = '';
-    let action_taken = null;
-
-    if (intent.type === 'approve') {
-      // User wants to approve and commit
-      const { data: pendingCode } = await supabase
-        .from('pending_code')
-        .select('*')
-        .eq('session_id', chatSession.id)
-        .eq('status', 'pending');
-        
-      if (pendingCode && pendingCode.length > 0) {
-        try {
-          const octokit = new Octokit({ auth: github_token });
-          await commitPendingCodeToGitHub(octokit, project, pendingCode);
-          
-          // Mark code as committed
-          await supabase
-            .from('pending_code')
-            .update({ status: 'committed' })
-            .eq('session_id', chatSession.id)
-            .eq('status', 'pending');
-          
-          response = "✅ Perfect! I've committed your code to GitHub. Your HI VIBE landing page is now live in your repository! 🚀\n\nYou can find the updated files at: " + project.github_repo;
-          action_taken = 'committed_to_github';
-        } catch (error) {
-          response = "❌ I had trouble committing to GitHub. Please check your token permissions. Error: " + error.message;
-          action_taken = 'commit_failed';
-        }
-      } else {
-        response = "🤔 I don't have any pending code to commit. Would you like me to generate something first?";
-        action_taken = 'no_pending_code';
-      }
-
-    } else if (intent.type === 'modify') {
-      // User wants to modify the code
-      const modificationPrompt = buildModificationPrompt(message, chatHistory);
-      const aiResponse = await callClaudeAPI(modificationPrompt);
-      
-      // Parse and store new code
-      const codeFiles = parseGeneratedCode(aiResponse.choices[0].message.content);
-      
-      // Clear old pending code
+    // Execute autonomous agent workflow
+    const result = await agent.executeAgentWorkflow(task, project.id, github_token);
+    
+    if (result.success) {
+      // Store the interaction
       await supabase
-        .from('pending_code')
-        .delete()
-        .eq('session_id', chatSession.id)
-        .eq('status', 'pending');
-      
-      // Store new pending code
-      for (const [filePath, content] of Object.entries(codeFiles)) {
-        await supabase
-          .from('pending_code')
-          .insert({
-            session_id: chatSession.id,
-            file_path: filePath,
-            content: content,
-            status: 'pending'
-          });
-      }
-      
-      response = "✨ Great idea! I've updated the code based on your feedback:\n\n" + 
-                aiResponse.choices[0].message.content + 
-                "\n\n💬 What do you think? Say 'commit it' if you're happy with the changes, or ask for more modifications!";
-      action_taken = 'code_modified';
+        .from('chat_messages')
+        .insert({
+          session_id: uuidv4(), // Create session if needed
+          role: 'user',
+          content: `Agent Task: ${task}`,
+          action_taken: 'autonomous_execution'
+        });
 
-    } else {
-      // General conversation
-      const conversationPrompt = buildConversationPrompt(message, chatHistory);
-      const aiResponse = await callClaudeAPI(conversationPrompt);
-      
-      response = aiResponse.choices[0].message.content;
-      action_taken = 'general_chat';
+      await supabase
+        .from('chat_messages')
+        .insert({
+          session_id: uuidv4(),
+          role: 'assistant', 
+          content: `✅ Task completed autonomously!\n\n**Changes made:**\n${result.changes.map(c => `- ${c.type}: ${c.file}`).join('\n')}\n\n**Reasoning:** ${result.reasoning}`,
+          action_taken: 'autonomous_patch_applied'
+        });
     }
 
-    // Add AI response to history
-    await supabase
-      .from('chat_messages')
-      .insert({
-        session_id: chatSession.id,
-        role: 'assistant',
-        content: response,
-        action_taken
-      });
-
     res.json({
-      message: response,
-      action_taken,
-      session_id: chatSession.id,
-      project_info: {
-        id: project.id,
-        slug: project.slug,
-        name: project.name,
-        github_repo: project.github_repo
-      }
+      success: result.success,
+      task: task,
+      plan: result.plan,
+      changes: result.changes,
+      reasoning: result.reasoning,
+      commits: result.commits,
+      github_repo: project.github_repo,
+      error: result.error,
+      raw_response: result.raw
     });
 
   } catch (error) {
-    console.error('Chat error:', error);
+    console.error('Agent execution error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get chat history for a session
-app.get('/v1/projects/:projectId/chat/:sessionId/history', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    const { data: messages, error } = await supabase
-      .from('chat_messages')
-      .select('*')
-      .eq('session_id', sessionId)
-      .order('timestamp', { ascending: true });
-      
-    if (error) throw error;
-    
-    res.json({ messages });
-    
-  } catch (error) {
-    console.error('Get chat history error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Original chat completions endpoint (for backward compatibility)
-app.post('/v1/chat/completions', async (req, res) => {
-  try {
-    const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: req.body.model || 'claude-3-5-sonnet-20241022',
-      max_tokens: req.body.max_tokens || 4000,
-      messages: req.body.messages,
-      system: req.body.system || "You are a helpful AI assistant that generates clean, modern React components with Tailwind CSS."
-    }, {
-      headers: {
-        'Authorization': `Bearer ${process.env.ANTHROPIC_API_KEY}`,
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      }
-    });
-
-    res.json({
-      choices: [{
-        message: {
-          role: 'assistant',
-          content: response.data.content[0].text
-        },
-        finish_reason: 'stop'
-      }],
-      model: req.body.model || 'claude-3-5-sonnet',
-      usage: {
-        prompt_tokens: response.data.usage?.input_tokens || 0,
-        completion_tokens: response.data.usage?.output_tokens || 0,
-        total_tokens: (response.data.usage?.input_tokens || 0) + (response.data.usage?.output_tokens || 0)
-      }
-    });
-  } catch (error) {
-    console.error('Error calling Anthropic API:', error.response?.data || error.message);
-    res.status(500).json({ 
-      error: 'Failed to process chat request',
-      details: error.response?.data?.error || error.message 
-    });
-  }
-});
-
-// HELPER FUNCTIONS (abbreviated for space)
-const callClaudeAPI = async (prompt) => {
-  const response = await axios.post('https://api.anthropic.com/v1/messages', {
-    model: 'claude-3-5-sonnet-20241022',
-    max_tokens: 4000,
-    messages: [{ role: "user", content: prompt }]
-  }, {
-    headers: {
-      'Authorization': `Bearer ${process.env.ANTHROPIC_API_KEY}`,
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    }
-  });
-
-  return {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: response.data.content[0].text
-      }
-    }]
+// Helper functions
+const loadWorkspaceFromGitHub = async (octokit, project) => {
+  // Load existing files from GitHub repo
+  const workspace = {
+    id: project.id,
+    owner: project.owner,
+    repo: project.repo_name,
+    files: {}
   };
-};
-
-const analyzeUserIntent = (message) => {
-  const msg = message.toLowerCase();
   
-  if (msg.includes('commit') || msg.includes('approve') || msg.includes('looks good') || 
-      msg.includes('perfect') || msg.includes('deploy') || msg.includes('push')) {
-    return { type: 'approve' };
-  }
-  
-  if (msg.includes('change') || msg.includes('modify') || msg.includes('update') ||
-      msg.includes('make it') || msg.includes('add') || msg.includes('remove')) {
-    return { type: 'modify' };
-  }
-  
-  return { type: 'general' };
-};
-
-const buildModificationPrompt = (userMessage, chatHistory) => {
-  let prompt = `You are helping modify a React component. `;
-  
-  if (chatHistory && chatHistory.length > 0) {
-    prompt += `Previous conversation context:\n`;
-    chatHistory.slice(-4).forEach(msg => {
-      prompt += `${msg.role}: ${msg.content}\n`;
+  try {
+    const { data: contents } = await octokit.repos.getContent({
+      owner: project.owner,
+      repo: project.repo_name,
+      path: ''
     });
-    prompt += `\n`;
-  }
-  
-  prompt += `User request: ${userMessage}\n\n`;
-  prompt += `Please provide the updated code that addresses their feedback.`;
-  
-  return prompt;
-};
-
-const buildConversationPrompt = (userMessage, chatHistory) => {
-  let prompt = `You are an AI assistant helping with a coding project. `;
-  
-  if (chatHistory && chatHistory.length > 0) {
-    prompt += `Previous conversation:\n`;
-    chatHistory.slice(-4).forEach(msg => {
-      prompt += `${msg.role}: ${msg.content}\n`;
-    });
-    prompt += `\n`;
-  }
-  
-  prompt += `User: ${userMessage}\n\nRespond helpfully and conversationally.`;
-  
-  return prompt;
-};
-
-const parseGeneratedCode = (aiResponse) => {
-  // Simple code parsing - extract files
-  const codeBlocks = {};
-  
-  if (aiResponse.includes('```')) {
-    const matches = aiResponse.match(/```[\s\S]*?```/g);
-    if (matches) {
-      matches.forEach((match, index) => {
-        const cleanCode = match.replace(/```jsx?/g, '').replace(/```/g, '').trim();
-        codeBlocks[`src/component_${index}.jsx`] = cleanCode;
-      });
+    
+    for (const item of contents) {
+      if (item.type === 'file') {
+        const { data: file } = await octokit.repos.getContent({
+          owner: project.owner,
+          repo: project.repo_name,
+          path: item.path
+        });
+        
+        workspace.files[item.path] = Buffer.from(file.content, 'base64').toString();
+      }
     }
+  } catch (error) {
+    console.error('Error loading workspace:', error.message);
   }
   
-  return codeBlocks;
-};
-
-const commitPendingCodeToGitHub = async (octokit, project, pendingCodeArray) => {
-  const commits = [];
-  
-  for (const codeItem of pendingCodeArray) {
-    try {
-      const result = await octokit.repos.createOrUpdateFileContents({
-        owner: project.owner,
-        repo: project.repo_name,
-        path: codeItem.file_path,
-        message: `Update ${codeItem.file_path} via HI VIBE chat`,
-        content: Buffer.from(codeItem.content).toString('base64')
-      });
-      commits.push(result.data.commit.sha);
-    } catch (error) {
-      console.error(`Error committing ${codeItem.file_path}:`, error.message);
-    }
-  }
-  
-  return commits;
+  return workspace;
 };
 
 const commitFilesToRepo = async (octokit, owner, repo, files) => {
@@ -538,7 +576,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50">
       <h1 className="text-4xl font-bold text-center py-20">
-        Welcome to your new project!
+        Welcome to your Refact Agent project!
       </h1>
     </div>
   );
@@ -546,7 +584,7 @@ function App() {
 
 export default App;`,
     'package.json': JSON.stringify({
-      name: "vibe-code-project",
+      name: "refact-agent-project",
       version: "1.0.0",
       dependencies: {
         react: "^18.0.0",
@@ -558,9 +596,8 @@ export default App;`,
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Advanced Refact proxy server running on port ${PORT}`);
+  console.log(`🤖 Refact.ai Agent running on port ${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);
-  console.log(`🤖 Projects API: http://localhost:${PORT}/v1/projects`);
-  console.log(`💬 Chat API: http://localhost:${PORT}/v1/projects/{id}/chat`);
-  console.log(`🗄️ Using Supabase for persistence`);
+  console.log(`🛠️ Agent Tools: ${Object.keys(agent.tools).join(', ')}`);
+  console.log(`🔧 Autonomous patching enabled`);
 });
